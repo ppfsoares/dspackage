@@ -1,0 +1,183 @@
+name: deploy_prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_notes:
+        type: string
+        required: true
+        description: 'Deploymenyt short notes'
+      jira_history:
+        type: string
+        required: true
+        description: 'Link of the Jira history or a list of stories, ex: SADS-1710,SADS-1703'
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check TAG
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.setFailed('Please, select a valid TAG instead branch [ ${{ github.ref_name }} ]')
+
+  tests_e2e:
+    name: 'Tests e2e'
+    runs-on: [self-hosted, zap, cd]
+    needs: check-tag
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+
+      - name: Cache dependencies
+        id: cache_dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('./package-lock.json') }}
+      - name: npm login
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+
+      - name: Install dependencies
+        if: steps.cache_dependencies.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - run: npm rebuild node-sass
+
+      - name: Cypress run
+        uses: cypress-io/github-action@v5
+        timeout-minutes: 15
+        env:
+          CYPRESS_FACEBOOK_ACCESS_TOKEN: ${{ secrets.CYPRESS_FACEBOOK_ACCESS_TOKEN }}
+          CYPRESS_GOOGLE_REFRESH_TOKEN: ${{ secrets.CYPRESS_GOOGLE_REFRESH_TOKEN }}
+          CYPRESS_GOOGLE_SECRET: ${{ secrets.CYPRESS_GOOGLE_SECRET }}
+        with:
+          build: npx cypress info
+          config: baseUrl=https://qa-c2c.zapimoveis.com.br/
+
+      - uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: tests-e2e-results
+          path: tests/e2e/results
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: tests-e2e-screenshots
+          path: tests/e2e/screenshots
+          retention-days: 1*/
+
+  deploy_prod:
+    name: 'Deploy prod'
+    needs: tests_e2e
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_BUCKET: c2c.zapimoveis.com.br
+      SLACK_CHANNEL: notifs-squad-imoveis-proprietarios
+      SLACK_USERNAME: albundy
+      SLACK_TITLE: Deploying albundy PROD
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      VUE_APP_GOOGLEMAPS_KEY: ${{ secrets.VUE_APP_GOOGLEMAPS_KEY }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+
+      - name: Cache dependencies
+        id: cache_dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('./package-lock.json') }}
+
+      - name: npm login
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+
+      - name: Install dependencies
+        if: steps.cache_dependencies.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#dbdb48'
+          SLACK_MESSAGE: 'Deploying version `${{ github.ref_name }}` to `production`...'
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CROSS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CROSS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-external-id: ${{ secrets.REPO_AWS_ROLE_TO_EXTERNAL_ID }}
+          role-to-assume: ${{ secrets.REPO_AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 3600
+
+      - name: build for production
+        run: npx vue-cli-service build --mode production
+        env:
+          VUE_APP_RELEASE_TAG: ${{ github.ref_name }}
+
+      - run: bash deploy.sh $DEPLOY_BUCKET
+
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#0aa524'
+          SLACK_MESSAGE: 'Deployed version `${{ github.ref_name }}` to `production` successfully!'
+
+      - name: Slack Failure Notification
+        if: ${{ failure() }}
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#d81111'
+          SLACK_MESSAGE: 'Failed to deploy version `${{ github.ref_name }}` to `production`'
+
+      - name: Dora Metrics
+        run: true
+
+      - name: Purge Cloudflare Cache
+        uses: nathanvaughn/actions-cloudflare-purge@master
+        with:
+          cf_zone: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          cf_auth: ${{ secrets.CLOUDFLARE_TOKEN_PURGE }}
+          hosts: |
+            anuncie.zapimoveis.com.br
+
+      - name: Invalidate CloudFront Cache
+        run: aws cloudfront create-invalidation --distribution-id ${{ secrets.AWS_CLOUDFRONT_DISTRIBUTION }} --paths '/*'
+
+  notify-critical-deployment:
+    needs: deploy_prod
+    runs-on: ubuntu-latest
+    name: Notify critical deployment slack channel
+    if: ${{ always() && needs.deploy_prod.result == 'success'}}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ssh-key: ${{ secrets.SSH_KEY }}
+          submodules: false
+
+      - name: Notify slack critical deployments
+        uses: olxbr/gha-slack-notify@v1
+        with:
+          slack_webhook_url: '${{ secrets.ZAP_CRITICAL_DEPLOYMENYS_SLACK_WEBHOOK_URL }}'
+          league: 'Imóveis'
+          tribe: 'growth'
+          squad: 'squad-imoveis-proprietarios'
+          application_description: 'Aplicação Frontend responsável pela Venda Online.'
+          impacted_devices: 'ZAP e VivaReal'
+          jira_history: ${{ inputs.jira_history }}
+          deployment_notes: '${{ inputs.deployment_notes }}'

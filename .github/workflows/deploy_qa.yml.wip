@@ -1,0 +1,64 @@
+name: deploy_qa
+on:
+  push:
+    branches:
+      - master
+    tags-ignore:
+      - v*
+jobs:
+  deploy_qa:
+    name: 'Deploy QA'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_BUCKET: qa-c2c.zapimoveis.com.br
+      SLACK_CHANNEL: notifs-squad-imoveis-proprietarios
+      SLACK_USERNAME: albundy
+      SLACK_TITLE: Deploying albundy QA
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+    steps:
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#dbdb48'
+          SLACK_MESSAGE: 'Deploying `main` branch to `qa`...'
+          VUE_APP_GOOGLEMAPS_KEY: ${{ secrets.VUE_APP_GOOGLEMAPS_KEY }}
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+      - name: Cache dependencies
+        id: cache_dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('./package-lock.json') }}
+      - name: npm login
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+      - name: Install dependencies
+        if: steps.cache_dependencies.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CROSS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CROSS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-external-id: ${{ secrets.REPO_AWS_ROLE_TO_EXTERNAL_ID }}
+          role-to-assume: ${{ secrets.REPO_AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 3600
+      - run: npx vue-cli-service build --mode qa
+      - run: bash deploy.sh $DEPLOY_BUCKET
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#0aa524'
+          SLACK_MESSAGE: 'Deployed `main` branch to `qa` successfully!'
+      - name: Slack Failure Notification
+        if: ${{ failure() }}
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: '#d81111'
+          SLACK_MESSAGE: 'Failed to deploy `main` branch to `qa`'

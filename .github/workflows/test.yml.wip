@@ -1,0 +1,28 @@
+name: Test
+on:
+  pull_request:
+    branches:
+      - 'test'
+jobs:
+  tests:
+    name: 'Test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+      - name: Cache dependencies
+        id: cache_dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('./package-lock.json') }}
+      - name: npm login
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+      - name: Install dependencies
+        if: steps.cache_dependencies.outputs.cache-hit != 'true'
+        run: npm ci
+      - run: npm run test:unit

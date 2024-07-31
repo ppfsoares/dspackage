@@ -1,0 +1,103 @@
+name: Deploy staging label
+on:
+  # pull_request:
+    # types: [labeled, opened, reopened]
+
+concurrency:
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup_dependencies:
+    if: |
+      contains(github.event.pull_request.head.commit.message, 'up-staging') ||
+      contains(github.event.pull_request.labels.*.name, 'staging')
+
+    name: 'Setup dependencies'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+      - name: Cache dependencies
+        id: cache_dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('**/package-lock.json') }}
+      - name: login npm
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+      - run: npm config set registry https://registry.npmjs.org/
+      - name: Install dependencies
+        if: steps.cache_dependencies.outputs.cache-hit != 'true'
+        run: npm i
+
+  deploy_stg:
+    if: |
+      contains(github.event.pull_request.head.commit.message, 'up-staging') ||
+      contains(github.event.pull_request.labels.*.name, 'staging')
+
+    environment:
+      name: Staging
+      url: https://${{ env.DEPLOY_BUCKET }}/${{ steps.branch_name.outputs.value }}
+    runs-on: ubuntu-latest
+    needs: setup_dependencies
+    env:
+      DEPLOY_BUCKET: stg-c2c.zapimoveis.com.br
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.17.1'
+
+
+      - name: Get branch name
+        id: branch_name
+        run: echo "value=temp-${{ github.head_ref }}" | tr / - >> $GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('**/package-lock.json') }}
+
+      - name: npm login
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+
+      - run: npm ci
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CROSS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CROSS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-external-id: ${{ secrets.REPO_AWS_ROLE_TO_EXTERNAL_ID }}
+          role-to-assume: ${{ secrets.REPO_AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 3600
+
+      - name: Build for QA
+        run: VUE_APP_BASE_PATH=${{ steps.branch_name.outputs.value }} npx vue-cli-service build --mode staging
+        env:
+          VUE_APP_DOBBY_INTEGRATION: ${{ secrets.DOBBY_AUTH_TOKEN }}
+
+      - run: sudo apt-get install rsync
+      - run: bash deploy_staging.sh ${{ env.DEPLOY_BUCKET }} ${{ steps.branch_name.outputs.value }}
+
+      - name: Update the Available Instances list
+        run: bash generate_available_instances.sh ${{ env.DEPLOY_BUCKET }} http://${{ env.DEPLOY_BUCKET }}
+
+      - name: Comment on PR
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          message: |
+            This is your staging link: https://${{ env.DEPLOY_BUCKET }}/${{ steps.branch_name.outputs.value }}
+          comment_tag: execution
+          pr_number: ${{ github.event.number }}
