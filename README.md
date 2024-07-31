@@ -1,6 +1,6 @@
 # Zandiva Design System
 
-> Esperamos reunir neste repo a implementação de todos os módulos do nosso Design System
+> Originally created to [Zandir](https://github.com/orgs/zandirdev) and used in https://zandir.com.br/ as private repo.
 
 Nosso objetivo é ter algo próximo do Andromeda da RocketSeat:
 
